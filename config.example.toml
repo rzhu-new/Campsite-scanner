@@ -1,0 +1,71 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  Campsite Scanner config — TEMPLATE
+#
+#  Copy this file to config.toml and edit that copy:
+#      copy config.example.toml config.toml      (Windows)
+#      cp config.example.toml config.toml        (macOS / Linux)
+#  config.toml is listed in .gitignore, so your real addresses and passwords
+#  never get committed.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# How often to check, in seconds (±20 % random jitter is added; minimum 10).
+# If Recreation.gov starts refusing requests, the scanner slows down on its own
+# (up to one check every 10 min) and speeds back up when it clears.
+# 45–60 s is a reasonable, polite default.
+check_interval_seconds = 45
+
+
+# ── What to watch ───────────────────────────────────────────────────────────
+# Add one [[watch]] block per campground + date window.
+# Find a campground_id with:   python campsite_scanner.py find "upper pines"
+# (or it's the number at the end of the recreation.gov campground URL).
+
+[[watch]]
+name           = "Yosemite - Upper Pines"
+campground_id  = "232447"
+check_in       = 2027-05-21          # first night
+check_out      = 2027-05-24          # morning you leave
+# nights: minimum consecutive nights you need inside the window.
+#   Leave it out to require the whole stay. Set it lower for flexible dates,
+#   e.g. a 2-week window with nights = 2 catches any 2-night stretch.
+nights         = 2
+# Optional filters (leave empty to accept any site):
+site_types     = []                  # e.g. ["STANDARD NONELECTRIC", "TENT ONLY"]  (substring match)
+sites          = []                  # e.g. ["017", "042"]  (site numbers as shown on recreation.gov)
+loops          = []                  # e.g. ["Upper Pines"]
+# enabled      = false               # uncomment to pause a watch without deleting it
+
+# A second example — uncomment and edit:
+# [[watch]]
+# name          = "Joshua Tree - Jumbo Rocks"
+# campground_id = "272300"
+# check_in      = 2027-03-12
+# check_out     = 2027-03-14
+
+
+# ── How to tell you ─────────────────────────────────────────────────────────
+# Enable any combination, then test with:  python campsite_scanner.py test-notify
+#
+# Secrets can go in config.toml OR in environment variables (env vars win):
+#   CAMPSITE_SMTP_PASSWORD, TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, NTFY_TOKEN
+
+[notify.email]
+enabled   = false
+to        = ["you@example.com"]        # one or more addresses
+username  = "your.address@gmail.com"   # the account that SENDS the alert
+password  = ""                          # Gmail: a 16-letter App Password, not your normal password
+smtp_host = "smtp.gmail.com"
+smtp_port = 587
+
+[notify.sms]                            # real text messages via Twilio (paid, needs setup — see README)
+enabled     = false
+to          = ["+15555550100"]          # E.164 format
+from        = "+15555550199"            # your Twilio number
+account_sid = ""
+auth_token  = ""
+
+[notify.ntfy]                           # free phone push notifications — easiest phone option
+enabled  = false
+topic    = "campsites-CHANGE-ME-to-something-random"   # acts like a password: anyone who knows it can read it
+server   = "https://ntfy.sh"
+priority = "high"                       # min | low | default | high | urgent

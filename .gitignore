@@ -1,0 +1,16 @@
+# Your real settings: email addresses, passwords, phone number, ntfy topic
+config.toml
+.env
+
+# Runtime files (reveal which campgrounds/dates you're watching)
+state.json
+scanner.log
+scanner.log.*
+
+# Python / editor clutter
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.vscode/
+.idea/
