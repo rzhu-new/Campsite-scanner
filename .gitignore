@@ -14,3 +14,8 @@ __pycache__/
 venv/
 .vscode/
 .idea/
+
+# PyInstaller build output
+build/
+dist/
+*.spec

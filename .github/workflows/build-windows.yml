@@ -1,0 +1,53 @@
+name: Build Windows app
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]          # pushing a tag like v1.0.0 also publishes a GitHub Release
+  pull_request:
+  workflow_dispatch:      # "Run workflow" button in the Actions tab
+
+permissions:
+  contents: write         # needed to create the Release on tag pushes
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Build CampsiteScanner.exe
+        run: pyinstaller --noconfirm --onefile --windowed --name CampsiteScanner campsite_gui.py
+
+      - name: Smoke-test the exe starts
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath dist\CampsiteScanner.exe -PassThru
+          Start-Sleep -Seconds 8
+          if ($p.HasExited) { Write-Error "CampsiteScanner.exe exited early (code $($p.ExitCode))"; exit 1 }
+          Stop-Process -Id $p.Id -Force
+          Write-Host "exe started and stayed up"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CampsiteScanner-windows
+          path: dist/CampsiteScanner.exe
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/CampsiteScanner.exe --title "Campsite Scanner $GITHUB_REF_NAME" --generate-notes

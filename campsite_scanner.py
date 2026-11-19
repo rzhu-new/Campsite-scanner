@@ -42,7 +42,7 @@ try:  # Python 3.11+
 except ModuleNotFoundError:  # Python 3.8–3.10
     import tomli as tomllib  # type: ignore
 
-HERE = Path(__file__).resolve().parent
+HERE = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 RECGOV = "https://www.recreation.gov"
 AVAIL_URL = RECGOV + "/api/camps/availability/campground/{cg}/month"
 SEARCH_URL = RECGOV + "/api/search"
@@ -76,6 +76,10 @@ class Watch:
         return f"{self.campground_id}:{self.check_in}:{self.check_out}:{self.nights}"
 
 
+class ConfigError(ValueError):
+    """Invalid config. The CLI turns this into a clean exit; the GUI shows it in a dialog."""
+
+
 def _as_date(v, what: str) -> date:
     if isinstance(v, datetime):
         return v.date()
@@ -84,7 +88,7 @@ def _as_date(v, what: str) -> date:
     try:
         return date.fromisoformat(str(v))
     except ValueError:
-        raise SystemExit(f"Config error: {what} must be YYYY-MM-DD, got {v!r}")
+        raise ConfigError(f"{what} must be YYYY-MM-DD, got {v!r}")
 
 
 def load_config(path: Path) -> dict:
@@ -93,21 +97,29 @@ def load_config(path: Path) -> dict:
         hint = f" — copy {example.name} to {path.name} and edit it" if example.exists() else ""
         raise SystemExit(f"Config file not found: {path}{hint}")
     with open(path, "rb") as f:
-        cfg = tomllib.load(f)
+        raw = tomllib.load(f)
+    try:
+        return parse_config(raw)
+    except ConfigError as e:
+        raise SystemExit(f"Config error: {e}")
 
+
+def parse_config(cfg: dict) -> dict:
+    """Validate a config dict (as read from TOML) and attach the parsed watches as cfg["_watches"]."""
+    cfg = dict(cfg)
     watches = []
     for i, w in enumerate(cfg.get("watch", []), 1):
         label = w.get("name") or f"watch #{i}"
         if "campground_id" not in w:
-            raise SystemExit(f"Config error: {label} is missing campground_id")
+            raise ConfigError(f"{label} is missing campground_id")
         ci = _as_date(w.get("check_in"), f"{label}.check_in")
         co = _as_date(w.get("check_out"), f"{label}.check_out")
         if co <= ci:
-            raise SystemExit(f"Config error: {label}: check_out must be after check_in")
+            raise ConfigError(f"{label}: check_out must be after check_in")
         stay = (co - ci).days
         nights = int(w.get("nights") or stay)
         if not 1 <= nights <= stay:
-            raise SystemExit(f"Config error: {label}: nights must be between 1 and {stay}")
+            raise ConfigError(f"{label}: nights must be between 1 and {stay}")
         watches.append(Watch(
             name=label,
             campground_id=str(w["campground_id"]),
@@ -180,6 +192,16 @@ def merge_months(parts: list[dict]) -> dict:
                 site["availabilities"] = dict(site.get("availabilities") or {})
                 merged[sid] = site
     return merged
+
+
+def search_campgrounds(query: str, size: int = 20) -> list[dict]:
+    """Search Recreation.gov campgrounds by name. Returns [{"id", "name", "park", "state"}]."""
+    r = thread_session().get(SEARCH_URL, params={"q": query, "fq": "entity_type:campground", "size": size},
+                             timeout=20)
+    r.raise_for_status()
+    return [{"id": str(x.get("entity_id", "")), "name": x.get("name", ""),
+             "park": x.get("parent_name", ""), "state": x.get("state_code", "")}
+            for x in r.json().get("results", []) if x.get("entity_id")]
 
 
 def campground_name(session: requests.Session, cg_id: str) -> str | None:
@@ -396,15 +418,17 @@ def send_ntfy(cfg: dict, title: str, text: str, click: str) -> None:
     r.raise_for_status()
 
 
-def notify(cfg: dict, subject: str, body: str, short: str, click: str, dry_run: bool = False) -> None:
+def notify(cfg: dict, subject: str, body: str, short: str, click: str, dry_run: bool = False) -> dict:
+    """Send on every enabled channel. Returns {channel: None if sent, else error message}."""
     n = cfg.get("notify", {})
     channels = [k for k in ("email", "sms", "ntfy") if n.get(k, {}).get("enabled")]
+    results: dict[str, str | None] = {}
     if dry_run:
         log.info("[dry-run] would notify via %s:\n%s", channels or "nothing", body)
-        return
+        return results
     if not channels:
-        log.warning("No notification channel enabled in config.toml — printing only:\n%s", body)
-        return
+        log.warning("No notification channel enabled — printing only:\n%s", body)
+        return results
     for ch in channels:
         try:
             if ch == "email":
@@ -414,8 +438,11 @@ def notify(cfg: dict, subject: str, body: str, short: str, click: str, dry_run: 
             elif ch == "ntfy":
                 send_ntfy(cfg, subject, short, click)
             log.info("Sent %s notification", ch)
+            results[ch] = None
         except Exception as e:  # one broken channel shouldn't block the others
             log.error("Failed to send %s notification: %s", ch, e)
+            results[ch] = str(e)
+    return results
 
 
 # --------------------------------------------------------------------------- main loop
@@ -433,7 +460,8 @@ def watch_months(w: Watch, today: date) -> list[date]:
     return list(month_starts(max(w.check_in, today), w.check_out - timedelta(days=1)))
 
 
-def scan(cfg: dict, state: State, names: dict, dry_run: bool, pool: ThreadPoolExecutor) -> dict:
+def scan(cfg: dict, state: State, names: dict, dry_run: bool, pool: ThreadPoolExecutor,
+         on_fresh=None) -> dict:
     """One pass over every watch. Fetches each campground-month once, in parallel.
     Returns {"openings": n, "rate_limited": bool, "errors": n}."""
     today = date.today()
@@ -472,6 +500,11 @@ def scan(cfg: dict, state: State, names: dict, dry_run: bool, pool: ThreadPoolEx
             subject, body, short = build_messages(w, cg_name, fresh)
             click = fresh[0].url if len(fresh) == 1 else CAMPGROUND_PAGE.format(cg=w.campground_id)
             notify(cfg, subject, body, short, click, dry_run)
+            if on_fresh:
+                try:
+                    on_fresh(w, cg_name, fresh)
+                except Exception:
+                    log.exception("on_fresh callback failed")
         if not dry_run:
             for label, secs in state.update(w.key, opens):
                 log.info("GONE  %s (%s): %s — was open for ~%.0f s", w.name, cg_name, label, secs)
@@ -491,77 +524,90 @@ def interval_seconds(cfg: dict) -> float:
     return s
 
 
+def run_loop(cfg: dict, state: State, *, dry_run: bool = False, once: bool = False,
+             stop: threading.Event | None = None, on_scan=None, on_fresh=None) -> None:
+    """Scan forever (or once) until `stop` is set. Used by both the CLI and the desktop app.
+
+    on_scan(result: dict, took_s: float, next_in_s: float | None) is called after every scan;
+    on_fresh(watch, campground_name, openings) is called when new openings are found."""
+    stop = stop or threading.Event()
+    base = interval_seconds(cfg)
+    cur = base
+    warned_blocked = False
+    pool = ThreadPoolExecutor(max_workers=WORKERS, thread_name_prefix="fetch")
+    try:
+        # Look up campground names once, in parallel.
+        ids = sorted({w.campground_id for w in active_watches(cfg, date.today())})
+        names = {}
+        for cg, name in zip(ids, pool.map(lambda cg: campground_name(thread_session(), cg), ids)):
+            names[cg] = name or f"Campground {cg}"
+
+        log.info("Watching %d campground(s) every %.0f s.", len(ids), base)
+        n, last_summary = 0, time.monotonic()
+        while not stop.is_set():
+            t0 = time.monotonic()
+            try:
+                res = scan(cfg, state, names, dry_run, pool, on_fresh=on_fresh)
+            except Exception:
+                log.exception("Scan failed; will retry next cycle")
+                res = {"openings": 0, "rate_limited": False, "errors": 1}
+            n += 1
+            took = time.monotonic() - t0
+
+            if res["rate_limited"]:
+                cur = min(cur * 2, MAX_BACKOFF_S)
+                log.warning("Backing off: next scan in %.0f s", cur)
+                if cur >= MAX_BACKOFF_S and not warned_blocked and not dry_run:
+                    warned_blocked = True
+                    notify(cfg, "⚠ Campsite Scanner is being rate-limited",
+                           "Recreation.gov is refusing requests (HTTP 429/403). The scanner has slowed to "
+                           f"one check every {MAX_BACKOFF_S // 60} min and will speed back up on its own. "
+                           "If this persists, raise the check interval.",
+                           "Campsite Scanner is being rate-limited by Recreation.gov; checks slowed to every 10 min.",
+                           RECGOV)
+            elif cur > base:
+                cur = max(base, cur * 0.7)  # ease back toward the normal pace
+                if cur == base:
+                    log.info("Rate limit cleared; back to every %.0f s", base)
+                    warned_blocked = False
+
+            if once:
+                log.info("Scan done: %d opening(s) in %.1f s", res["openings"], took)
+                if on_scan:
+                    on_scan(res, took, None)
+                return
+            # One summary line per ~5 min instead of per scan, so the log stays readable.
+            if time.monotonic() - last_summary >= 300:
+                log.info("Still watching: %d scans in last ~5 min, last scan %.1f s, %d current opening(s)",
+                         n, took, res["openings"])
+                n, last_summary = 0, time.monotonic()
+
+            # Fixed-rate schedule: subtract the time the scan took, add ±20 % jitter.
+            wait = max(1.0, cur * random.uniform(0.8, 1.2) - took)
+            if on_scan:
+                on_scan(res, took, wait)
+            stop.wait(wait)  # returns early the moment stop is set
+    finally:
+        pool.shutdown(wait=False)
+
+
 def cmd_run(args) -> None:
     cfg = load_config(args.config)
     if not cfg["_watches"]:
         raise SystemExit("No [[watch]] entries in config.toml — add at least one.")
     state = State(args.config.with_name("state.json"))
-    base = interval_seconds(cfg)
-    cur = base
-    warned_blocked = False
-    pool = ThreadPoolExecutor(max_workers=WORKERS, thread_name_prefix="fetch")
-
-    # Look up campground names once, in parallel.
-    ids = sorted({w.campground_id for w in active_watches(cfg, date.today())})
-    names = {}
-    for cg, name in zip(ids, pool.map(lambda cg: campground_name(thread_session(), cg), ids)):
-        names[cg] = name or f"Campground {cg}"
-
-    log.info("Watching %d campground(s) every %.0f s. Ctrl+C to stop.", len(ids), base)
-    n, last_summary = 0, time.monotonic()
-    while True:
-        t0 = time.monotonic()
-        try:
-            res = scan(cfg, state, names, args.dry_run, pool)
-        except Exception:
-            log.exception("Scan failed; will retry next cycle")
-            res = {"openings": 0, "rate_limited": False, "errors": 1}
-        n += 1
-        took = time.monotonic() - t0
-
-        if res["rate_limited"]:
-            cur = min(cur * 2, MAX_BACKOFF_S)
-            log.warning("Backing off: next scan in %.0f s", cur)
-            if cur >= MAX_BACKOFF_S and not warned_blocked and not args.dry_run:
-                warned_blocked = True
-                notify(cfg, "⚠ Campsite Scanner is being rate-limited",
-                       "Recreation.gov is refusing requests (HTTP 429/403). The scanner has slowed to "
-                       f"one check every {MAX_BACKOFF_S // 60} min and will speed back up on its own. "
-                       "If this persists, raise check_interval_seconds in config.toml.",
-                       "Campsite Scanner is being rate-limited by Recreation.gov; checks slowed to every 10 min.",
-                       RECGOV)
-        elif cur > base:
-            cur = max(base, cur * 0.7)  # ease back toward the normal pace
-            if cur == base:
-                log.info("Rate limit cleared; back to every %.0f s", base)
-                warned_blocked = False
-
-        if args.once:
-            log.info("Scan done: %d opening(s) in %.1f s", res["openings"], took)
-            pool.shutdown()
-            return
-        # One summary line per ~5 min instead of per scan, so the log stays readable at 15 s.
-        if time.monotonic() - last_summary >= 300:
-            log.info("Still watching: %d scans in last ~5 min, last scan %.1f s, %d current opening(s)",
-                     n, took, res["openings"])
-            n, last_summary = 0, time.monotonic()
-
-        # Fixed-rate schedule: subtract the time the scan took, add ±20 % jitter.
-        time.sleep(max(1.0, cur * random.uniform(0.8, 1.2) - took))
+    log.info("Starting. Ctrl+C to stop.")
+    run_loop(cfg, state, dry_run=args.dry_run, once=args.once)
 
 
 def cmd_find(args) -> None:
-    s = make_session()
-    r = s.get(SEARCH_URL, params={"q": " ".join(args.query), "fq": "entity_type:campground", "size": 20}, timeout=20)
-    r.raise_for_status()
-    results = r.json().get("results", [])
+    results = search_campgrounds(" ".join(args.query))
     if not results:
         print("No campgrounds found.")
         return
     print(f"{'ID':<10}  {'Campground':<45}  Park / area")
-    for res in results:
-        print(f"{res.get('entity_id', ''):<10}  {res.get('name', '')[:45]:<45}  "
-              f"{res.get('parent_name', '')} ({res.get('state_code', '')})")
+    for r in results:
+        print(f"{r['id']:<10}  {r['name'][:45]:<45}  {r['park']} ({r['state']})")
 
 
 def cmd_test_notify(args) -> None:

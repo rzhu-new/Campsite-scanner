@@ -7,6 +7,24 @@ it alerts you by **email**, **phone push (ntfy)**, and/or **SMS (Twilio)**.
 It **only alerts you**: you still book the site yourself. Automated booking breaks
 Recreation.gov's terms of use, so this tool deliberately doesn't do it.
 
+## Download the Windows app (no Python needed)
+
+1. Go to the [**Releases** page](https://github.com/Ruoxi-Zhu/Campsite-scanner/releases/latest) and download
+   `CampsiteScanner.exe`.
+2. Double-click it. Windows may show **"Windows protected your PC"** because the app isn't code-signed.
+   Click **More info → Run anyway**.
+3. In the app:
+   - **Campgrounds:** click **Add…**, search for a campground, pick it, and enter your dates.
+   - **Alerts:** turn on phone push (ntfy) and/or email, then click **Send a test alert**.
+   - Click **▶ Start scanning** and leave the window open (minimizing is fine).
+
+While scanning, the app keeps your PC from going to sleep (the screen can still turn off). When a site
+opens up, it sends your alerts and opens the booking page in your browser.
+
+Settings, history and the log are stored in `%APPDATA%\CampsiteScanner`, never next to the program.
+
+![Campgrounds tab](docs/screenshot-campgrounds.png)
+
 ## Features
 
 - Watch any number of campgrounds, each with its own date window.
@@ -18,7 +36,7 @@ Recreation.gov's terms of use, so this tool deliberately doesn't do it.
 - The log records which site opened and how long it stayed open
   (`GONE … site 042 11/26-11/28 — was open for ~142 s`).
 
-## Quick start
+## Command-line version (for developers)
 
 Requires Python 3.8+.
 
@@ -83,6 +101,25 @@ The scanner only checks while it's running and the computer is awake. Options:
   (QuickEdit mode). Press Esc to resume, or turn QuickEdit off.
 - **An always-on machine:** a small cloud VM (e.g. a Google Cloud e2-micro) or a Raspberry Pi.
   The script runs unchanged on Linux.
+
+## Building the app yourself
+
+GitHub Actions builds `CampsiteScanner.exe` on every push (download it from the run's **Artifacts**), and
+pushing a version tag publishes a Release:
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+To build locally on Windows:
+
+```bash
+pip install -r requirements.txt pyinstaller
+pyinstaller --onefile --windowed --name CampsiteScanner campsite_gui.py   # → dist/CampsiteScanner.exe
+```
+
+To run the tests: `python -m unittest discover -s tests -v`
 
 ## Be polite
 
